@@ -37,15 +37,34 @@ export default function RecipeView({
   );
 
   const updateImageStatuses = useCallback(async () => {
-    if (!recipeId) return;
+    const id = recipeId?.trim();
+    if (!id) return;
+    const path = `/api/recipes/${encodeURIComponent(id)}/images/status`;
+    const maxAttempts = 5;
+    const pauseMs = 500;
+
     try {
-      const res = await fetch(`/api/recipes/${recipeId}/images/status`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.steps) {
-        window.dispatchEvent(new CustomEvent("image-status-update", { detail: data.steps }));
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, pauseMs));
+        }
+        const res = await fetch(path, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.steps) {
+            window.dispatchEvent(
+              new CustomEvent("image-status-update", { detail: data.steps })
+            );
+          }
+          return;
+        }
+        if (res.status !== 404) {
+          return;
+        }
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [recipeId]);
 
   useEffect(() => {

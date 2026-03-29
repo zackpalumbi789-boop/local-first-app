@@ -79,13 +79,21 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
           try {
             const event = JSON.parse(jsonStr);
             switch (event.type) {
-              case "meta":
-                if (!isAdjust) setRecipeId(event.data.recipe_id);
-                setTitle(event.data.title);
-                setSummary(event.data.summary);
-                setSourceLinks(event.data.source_links || []);
+              case "meta": {
+                const rid = event.data.recipe_id;
+                if (!isAdjust && typeof rid === "string" && rid.trim()) {
+                  setRecipeId(rid.trim());
+                }
+                setTitle(String(event.data.title ?? ""));
+                setSummary(String(event.data.summary ?? ""));
+                setSourceLinks(
+                  Array.isArray(event.data.source_links)
+                    ? (event.data.source_links as string[])
+                    : []
+                );
                 if (isAdjust) setSteps([]);
                 break;
+              }
               case "step": {
                 const d = event.data;
                 setSteps((prev) => {
@@ -115,9 +123,14 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
                 });
                 break;
               }
-              case "done":
+              case "done": {
+                const rid = event.data.recipe_id;
+                if (typeof rid === "string" && rid.trim()) {
+                  setRecipeId(rid.trim());
+                }
                 setStatus("completed");
                 break;
+              }
               case "error":
                 setErrorMessage(event.data.message);
                 setStatus("failed");
