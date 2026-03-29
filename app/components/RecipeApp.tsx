@@ -75,7 +75,8 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
           prompts?: string[];
         };
         if (!data.configured || !Array.isArray(data.prompts)) return;
-        if (data.prompts.length !== stepIds.length) return;
+        const prompts = data.prompts;
+        if (prompts.length !== stepIds.length) return;
 
         await Promise.all(
           stepIds.map((stepId, i) =>
@@ -84,7 +85,7 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 step_id: stepId,
-                prompt: data.prompts[i] ?? "",
+                prompt: prompts[i] ?? "",
               }),
             }).then(async (r) => {
               if (!r.ok) return;
