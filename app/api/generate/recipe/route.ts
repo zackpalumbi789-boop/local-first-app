@@ -2,14 +2,8 @@ import {
   createRecipe,
   createStep,
   updateRecipe,
-  updateStepImage,
 } from "@/lib/store";
 import { findRecipe, isRecipeQuery } from "@/lib/recipe-generator";
-import {
-  generateFoodImage,
-  generateImagePrompts,
-  isImageGenConfigured,
-} from "@/lib/image-gen";
 import type { StreamEvent } from "@/lib/types";
 
 /**
@@ -53,10 +47,6 @@ import type { StreamEvent } from "@/lib/types";
  */
 
 export const dynamic = "force-dynamic";
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export async function POST(request: Request) {
   const { query, user_id } = await request.json();
@@ -106,11 +96,6 @@ export async function POST(request: Request) {
           source_links: generated.source_links,
         });
 
-        const imagePromptsPromise = generateImagePrompts(
-          generated.title,
-          generated.steps.map((s) => s.description)
-        );
-
         const metaEvent: StreamEvent = {
           type: "meta",
           data: {
@@ -124,9 +109,6 @@ export async function POST(request: Request) {
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify(metaEvent)}\n\n`)
         );
-        await sleep(200);
-
-        const imagePrompts = await imagePromptsPromise;
 
         for (let i = 0; i < generated.steps.length; i++) {
           const rawStep = generated.steps[i];
@@ -138,27 +120,8 @@ export async function POST(request: Request) {
             rawStep.duration
           );
 
-          const chars = rawStep.description.split("");
-          const chunkSize = 3;
-          for (let c = 0; c < chars.length; c += chunkSize) {
-            const chunk = chars.slice(c, c + chunkSize).join("");
-            const partialEvent: StreamEvent = {
-              type: "step",
-              data: {
-                step_id: step.id,
-                step_order: i + 1,
-                text_chunk: chunk,
-                is_complete: false,
-                ingredients: [],
-                duration: 0,
-              },
-            };
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`)
-            );
-            await sleep(30 + Math.random() * 40);
-          }
-
+          // 不在此连接上做「逐字打字」延迟：EdgeOne 等网关在单条 SSE 上有总时长上限，
+          // 过长会 context deadline exceeded，客户端只能收到 meta、收不到 step。
           const completeEvent: StreamEvent = {
             type: "step",
             data: {
@@ -170,21 +133,12 @@ export async function POST(request: Request) {
               ingredients: rawStep.ingredients,
               duration: rawStep.duration,
               image_status: "PENDING",
+              image_url: null,
             },
           };
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(completeEvent)}\n\n`)
           );
-
-          triggerImageGeneration(
-            step.id,
-            generated.title,
-            rawStep.description,
-            i + 1,
-            generated.steps.length,
-            imagePrompts?.[i]
-          );
-          await sleep(150);
         }
 
         await updateRecipe(recipe.id, { status: "COMPLETED" });
@@ -219,39 +173,4 @@ export async function POST(request: Request) {
       Connection: "keep-alive",
     },
   });
-}
-
-function triggerImageGeneration(
-  stepId: string,
-  dishName: string,
-  stepDescription: string,
-  stepOrder: number,
-  totalSteps: number,
-  customPrompt?: string
-) {
-  if (!isImageGenConfigured()) {
-    void updateStepImage(stepId, null, "FAILED");
-    return;
-  }
-
-  void updateStepImage(stepId, null, "GENERATING");
-
-  generateFoodImage(
-    dishName,
-    stepDescription,
-    stepOrder,
-    customPrompt,
-    totalSteps
-  )
-    .then(async (url) => {
-      if (url) {
-        await updateStepImage(stepId, url, "SUCCESS");
-      } else {
-        await updateStepImage(stepId, null, "FAILED");
-      }
-    })
-    .catch(async (err) => {
-      console.error("[ImageGen] Uncaught error:", err);
-      await updateStepImage(stepId, null, "FAILED");
-    });
 }

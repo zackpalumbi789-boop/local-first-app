@@ -5,14 +5,8 @@ import {
   clearStepsByRecipe,
   createStep,
   updateRecipe,
-  updateStepImage,
 } from "@/lib/store";
 import { applyAdjustment } from "@/lib/recipe-generator";
-import {
-  generateFoodImage,
-  generateImagePrompts,
-  isImageGenConfigured,
-} from "@/lib/image-gen";
 import type { StreamEvent } from "@/lib/types";
 
 /**
@@ -53,10 +47,6 @@ import type { StreamEvent } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -92,11 +82,6 @@ export async function POST(
 
         const newSummary = recipe.summary.replace(/（已根据.*/, "") + summary_suffix;
 
-        const imagePromptsPromise = generateImagePrompts(
-          recipe.title,
-          adjustedSteps.map((s) => s.description)
-        );
-
         const metaEvent: StreamEvent = {
           type: "meta",
           data: {
@@ -111,9 +96,6 @@ export async function POST(
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify(metaEvent)}\n\n`)
         );
-        await sleep(200);
-
-        const imagePrompts = await imagePromptsPromise;
 
         for (let i = 0; i < adjustedSteps.length; i++) {
           const rawStep = adjustedSteps[i];
@@ -124,25 +106,6 @@ export async function POST(
             rawStep.ingredients,
             rawStep.duration
           );
-
-          const chars = rawStep.description.split("");
-          const chunkSize = 5;
-          for (let c = 0; c < chars.length; c += chunkSize) {
-            const chunk = chars.slice(c, c + chunkSize).join("");
-            const partialEvent: StreamEvent = {
-              type: "step",
-              data: {
-                step_id: step.id,
-                step_order: i + 1,
-                text_chunk: chunk,
-                is_complete: false,
-              },
-            };
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`)
-            );
-            await sleep(20 + Math.random() * 30);
-          }
 
           const completeEvent: StreamEvent = {
             type: "step",
@@ -155,21 +118,12 @@ export async function POST(
               ingredients: rawStep.ingredients,
               duration: rawStep.duration,
               image_status: "PENDING",
+              image_url: null,
             },
           };
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(completeEvent)}\n\n`)
           );
-
-          triggerImageGeneration(
-            step.id,
-            recipe.title,
-            rawStep.description,
-            i + 1,
-            adjustedSteps.length,
-            imagePrompts?.[i]
-          );
-          await sleep(150);
         }
 
         await updateRecipe(id, {
@@ -207,39 +161,4 @@ export async function POST(
       Connection: "keep-alive",
     },
   });
-}
-
-function triggerImageGeneration(
-  stepId: string,
-  dishName: string,
-  stepDescription: string,
-  stepOrder: number,
-  totalSteps: number,
-  customPrompt?: string
-) {
-  if (!isImageGenConfigured()) {
-    void updateStepImage(stepId, null, "FAILED");
-    return;
-  }
-
-  void updateStepImage(stepId, null, "GENERATING");
-
-  generateFoodImage(
-    dishName,
-    stepDescription,
-    stepOrder,
-    customPrompt,
-    totalSteps
-  )
-    .then(async (url) => {
-      if (url) {
-        await updateStepImage(stepId, url, "SUCCESS");
-      } else {
-        await updateStepImage(stepId, null, "FAILED");
-      }
-    })
-    .catch(async (err) => {
-      console.error("[ImageGen] Uncaught error:", err);
-      await updateStepImage(stepId, null, "FAILED");
-    });
 }

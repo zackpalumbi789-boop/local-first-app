@@ -27,6 +27,8 @@ type RecipeAppProps = {
   } | null;
 };
 
+type RecipeStreamFollowUp = { recipeId: string; stepIds: string[] };
+
 export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
   const router = useRouter();
   const [recipeId, setRecipeId] = useState<string | null>(null);
@@ -60,10 +62,68 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
     return () => window.removeEventListener("image-status-update", handler);
   }, []);
 
+  const fillRecipeStepImages = useCallback(
+    async (recipeIdForImages: string, stepIds: string[]) => {
+      if (stepIds.length === 0) return;
+      try {
+        const pr = await fetch(`/api/recipes/${recipeIdForImages}/image-prompts`, {
+          method: "POST",
+        });
+        if (!pr.ok) return;
+        const data = (await pr.json()) as {
+          configured?: boolean;
+          prompts?: string[];
+        };
+        if (!data.configured || !Array.isArray(data.prompts)) return;
+        if (data.prompts.length !== stepIds.length) return;
+
+        await Promise.all(
+          stepIds.map((stepId, i) =>
+            fetch(`/api/recipes/${recipeIdForImages}/step-image`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                step_id: stepId,
+                prompt: data.prompts[i] ?? "",
+              }),
+            }).then(async (r) => {
+              if (!r.ok) return;
+              const j = (await r.json()) as {
+                image_status: ImageStatus;
+                image_url: string | null;
+              };
+              window.dispatchEvent(
+                new CustomEvent("image-status-update", {
+                  detail: [
+                    {
+                      id: stepId,
+                      step_order: 0,
+                      image_status: j.image_status,
+                      image_url: j.image_url,
+                    },
+                  ],
+                })
+              );
+            })
+          )
+        );
+      } catch {
+        /* 配图失败不影响正文展示 */
+      }
+    },
+    []
+  );
+
   const processStream = useCallback(
-    async (response: Response, isAdjust = false) => {
+    async (
+      response: Response,
+      isAdjust = false
+    ): Promise<RecipeStreamFollowUp | null> => {
       const reader = response.body?.getReader();
-      if (!reader) return;
+      if (!reader) return null;
+      const followUp: RecipeStreamFollowUp = { recipeId: "", stepIds: [] };
+      let sawDone = false;
+      let sawError = false;
       const decoder = new TextDecoder();
       let buffer = "";
       while (true) {
@@ -81,6 +141,9 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
             switch (event.type) {
               case "meta": {
                 const rid = event.data.recipe_id;
+                if (typeof rid === "string" && rid.trim()) {
+                  followUp.recipeId = rid.trim();
+                }
                 if (!isAdjust && typeof rid === "string" && rid.trim()) {
                   setRecipeId(rid.trim());
                 }
@@ -96,6 +159,9 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
               }
               case "step": {
                 const d = event.data;
+                if (d.is_complete && typeof d.step_id === "string") {
+                  followUp.stepIds.push(d.step_id);
+                }
                 setSteps((prev) => {
                   const existing = prev.find((s) => s.id === d.step_id);
                   if (existing) {
@@ -107,7 +173,16 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
                             isComplete: d.is_complete,
                             ingredients: d.is_complete ? d.ingredients : s.ingredients,
                             duration: d.is_complete ? d.duration : s.duration,
-                            imageStatus: d.is_complete ? d.image_status || "PENDING" : s.imageStatus,
+                            imageStatus: d.is_complete
+                              ? ((d.image_status as ImageStatus) ?? "PENDING")
+                              : s.imageStatus,
+                            imageUrl: d.is_complete
+                              ? typeof d.image_url === "string"
+                                ? d.image_url
+                                : d.image_url === null
+                                  ? null
+                                  : s.imageUrl
+                              : s.imageUrl,
                           }
                         : s
                     );
@@ -115,23 +190,41 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
                   return [
                     ...prev,
                     {
-                      id: d.step_id, stepOrder: d.step_order, text: d.text_chunk,
-                      isComplete: false, ingredients: [], duration: 0,
-                      imageStatus: "PENDING" as ImageStatus, imageUrl: null,
+                      id: d.step_id,
+                      stepOrder: d.step_order,
+                      text: d.is_complete
+                        ? String(d.description ?? "")
+                        : d.text_chunk,
+                      isComplete: Boolean(d.is_complete),
+                      ingredients: d.is_complete ? d.ingredients ?? [] : [],
+                      duration: d.is_complete ? d.duration ?? 0 : 0,
+                      imageStatus: (d.is_complete
+                        ? ((d.image_status as ImageStatus) ?? "PENDING")
+                        : "PENDING") as ImageStatus,
+                      imageUrl: d.is_complete
+                        ? typeof d.image_url === "string"
+                          ? d.image_url
+                          : d.image_url === null
+                            ? null
+                            : null
+                        : null,
                     },
                   ];
                 });
                 break;
               }
               case "done": {
+                sawDone = true;
                 const rid = event.data.recipe_id;
                 if (typeof rid === "string" && rid.trim()) {
+                  followUp.recipeId = rid.trim();
                   setRecipeId(rid.trim());
                 }
                 setStatus("completed");
                 break;
               }
               case "error":
+                sawError = true;
                 setErrorMessage(event.data.message);
                 setStatus("failed");
                 break;
@@ -139,6 +232,22 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
           } catch { /* skip */ }
         }
       }
+      if (!sawDone && !sawError) {
+        setStatus((s) => (s === "generating" ? "failed" : s));
+        setErrorMessage(
+          (prev) =>
+            prev ?? "生成中断（常见于网关超时）。请重试；若仍失败需在 EdgeOne 侧放宽页面函数超时。"
+        );
+      }
+      if (
+        sawDone &&
+        !sawError &&
+        followUp.recipeId &&
+        followUp.stepIds.length > 0
+      ) {
+        return followUp;
+      }
+      return null;
     },
     []
   );
@@ -161,14 +270,15 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
           body: JSON.stringify({ query }), signal: ac.signal,
         });
         if (!res.ok) throw new Error("请求失败");
-        await processStream(res);
+        const followUp = await processStream(res);
+        if (followUp) void fillRecipeStepImages(followUp.recipeId, followUp.stepIds);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         setErrorMessage("网络连接失败，请稍后重试");
         setStatus("failed");
       }
     },
-    [processStream, initialUser, router]
+    [processStream, fillRecipeStepImages, initialUser, router]
   );
 
   const handleAdjust = useCallback(
@@ -187,7 +297,8 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
           body: JSON.stringify({ instruction }),
         });
         if (!res.ok) throw new Error("调整失败");
-        await processStream(res, true);
+        const followUp = await processStream(res, true);
+        if (followUp) void fillRecipeStepImages(followUp.recipeId, followUp.stepIds);
       } catch {
         setErrorMessage("调整失败，请稍后重试");
         setStatus("failed");
@@ -195,7 +306,7 @@ export default function RecipeApp({ initialUser = null }: RecipeAppProps) {
         setIsAdjusting(false);
       }
     },
-    [recipeId, processStream, initialUser, router]
+    [recipeId, processStream, fillRecipeStepImages, initialUser, router]
   );
 
   return (
