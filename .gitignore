@@ -23,6 +23,9 @@
 # production
 /build
 
+# IDE / editor (MCP、本地配置等，勿提交以免泄露 Token)
+.cursor/
+
 # misc
 .DS_Store
 *.pem
