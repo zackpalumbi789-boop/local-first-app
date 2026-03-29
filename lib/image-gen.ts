@@ -186,29 +186,17 @@ export function isImageGenConfigured(): boolean {
 }
 
 /**
- * Two-phase: (1) LLM analyzes per-step ingredient doneness / cut / container;
- * (2) LLM writes image prompts strictly from that JSON. Falls back to single-shot if phase 1 fails.
+ * 两阶段：分析 JSON + 写提示词。仅当 `IMAGE_PROMPTS_TWO_PHASE=true` 时作为主路径尝试；
+ * 失败或未启用时退回单次 legacy（默认），避免 EdgeOne 等网关单请求超时（504）。
  */
-export async function generateImagePrompts(
+async function generateImagePromptsTwoPhase(
   dishName: string,
-  stepDescriptions: string[]
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+  n: number,
+  stepList: string
 ): Promise<string[] | null> {
-  const apiKey = getApiKey();
-  const baseUrl = (
-    process.env.LLM_BASE_URL ??
-    "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  ).trim();
-  const model = process.env.LLM_MODEL ?? "qwen-plus";
-
-  if (!apiKey || apiKey === "your-api-key-here") return null;
-
-  const n = stepDescriptions.length;
-  if (n === 0) return null;
-
-  const stepList = stepDescriptions
-    .map((d, i) => `步骤${i + 1}/${n}: ${d}`)
-    .join("\n");
-
   console.log(
     `[ImagePrompt] Phase 1 — step/ingredient analysis for "${dishName}" (${n} steps)`
   );
@@ -231,23 +219,29 @@ ${stepList}`;
 
   const analysis = normalizeAnalysis(analysisRaw, n);
 
-  if (analysis) {
-    console.log(
-      `[ImagePrompt] Phase 1 OK — ${analysis.steps.length} steps analyzed`
+  if (!analysis) {
+    console.warn(
+      "[ImagePrompt] Phase 1 failed or invalid shape, will try legacy single-shot"
     );
-    analysis.steps.forEach((s, i) => {
-      const ing = s.ingredients
-        .map(
-          (x) =>
-            `${x.name}[${x.doneness}|${x.cut_shape}|${x.in_container}]`
-        )
-        .join("; ");
-      console.log(
-        `  Step ${i + 1}: ${s.step_scene_one_liner ?? ""} | ${ing || "(无分项)"}`
-      );
-    });
+    return null;
+  }
 
-    const phase2UserMsg = `菜名：${dishName}
+  console.log(
+    `[ImagePrompt] Phase 1 OK — ${analysis.steps.length} steps analyzed`
+  );
+  analysis.steps.forEach((s, i) => {
+    const ing = s.ingredients
+      .map(
+        (x) =>
+          `${x.name}[${x.doneness}|${x.cut_shape}|${x.in_container}]`
+      )
+      .join("; ");
+    console.log(
+      `  Step ${i + 1}: ${s.step_scene_one_liner ?? ""} | ${ing || "(无分项)"}`
+    );
+  });
+
+  const phase2UserMsg = `菜名：${dishName}
 共 ${n} 步。以下为「工序与食材状态分析」JSON，必须严格据此写绘画提示词（不可提高熟度、不可更换容器为成品盘除非分析如此）。
 
 【分析 JSON】
@@ -256,36 +250,80 @@ ${JSON.stringify(analysis)}
 【原文步骤】（核对用，与分析冲突时以分析为准）
 ${stepList}`;
 
-    const promptRaw = await llmChatJson({
+  const promptRaw = await llmChatJson({
+    apiKey,
+    baseUrl,
+    model,
+    system: IMAGE_PROMPT_FROM_ANALYSIS_SYSTEM,
+    user: phase2UserMsg,
+    max_tokens: 1600,
+    temperature: 0.55,
+    logLabel: "ImagePrompt/PromptsFromAnalysis",
+  });
+
+  const promptParsed = promptRaw as { prompts?: string[] } | null;
+  const prompts = Array.isArray(promptParsed?.prompts)
+    ? promptParsed.prompts
+    : [];
+
+  if (prompts.length === n) {
+    console.log("[ImagePrompt] Phase 2 OK — prompts:");
+    prompts.forEach((p, i) => console.log(`  Step ${i + 1}: ${p}`));
+    return prompts;
+  }
+
+  console.warn(
+    `[ImagePrompt] Phase 2 length mismatch (${prompts.length} vs ${n}), will try legacy single-shot`
+  );
+  return null;
+}
+
+export async function generateImagePrompts(
+  dishName: string,
+  stepDescriptions: string[]
+): Promise<string[] | null> {
+  const apiKey = getApiKey();
+  const baseUrl = (
+    process.env.LLM_BASE_URL ??
+    "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  ).trim();
+  const model = process.env.LLM_MODEL ?? "qwen-plus";
+
+  if (!apiKey || apiKey === "your-api-key-here") return null;
+
+  const n = stepDescriptions.length;
+  if (n === 0) return null;
+
+  const stepList = stepDescriptions
+    .map((d, i) => `步骤${i + 1}/${n}: ${d}`)
+    .join("\n");
+
+  const useTwoPhase = process.env.IMAGE_PROMPTS_TWO_PHASE === "true";
+
+  if (!useTwoPhase) {
+    console.log(
+      `[ImagePrompt] Single-shot mode (default; set IMAGE_PROMPTS_TWO_PHASE=true for two-phase LLM)`
+    );
+    return generateImagePromptsLegacy(
+      dishName,
+      stepDescriptions,
       apiKey,
       baseUrl,
       model,
-      system: IMAGE_PROMPT_FROM_ANALYSIS_SYSTEM,
-      user: phase2UserMsg,
-      max_tokens: 1600,
-      temperature: 0.55,
-      logLabel: "ImagePrompt/PromptsFromAnalysis",
-    });
-
-    const promptParsed = promptRaw as { prompts?: string[] } | null;
-    const prompts = Array.isArray(promptParsed?.prompts)
-      ? promptParsed.prompts
-      : [];
-
-    if (prompts.length === n) {
-      console.log("[ImagePrompt] Phase 2 OK — prompts:");
-      prompts.forEach((p, i) => console.log(`  Step ${i + 1}: ${p}`));
-      return prompts;
-    }
-
-    console.warn(
-      `[ImagePrompt] Phase 2 length mismatch (${prompts.length} vs ${n}), fallback to legacy`
-    );
-  } else {
-    console.warn(
-      "[ImagePrompt] Phase 1 failed or invalid shape, fallback to legacy single-shot"
+      n,
+      stepList
     );
   }
+
+  const fromTwoPhase = await generateImagePromptsTwoPhase(
+    dishName,
+    apiKey,
+    baseUrl,
+    model,
+    n,
+    stepList
+  );
+  if (fromTwoPhase) return fromTwoPhase;
 
   return generateImagePromptsLegacy(
     dishName,
