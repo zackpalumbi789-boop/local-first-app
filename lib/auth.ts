@@ -70,10 +70,25 @@ const hasGithubOAuth =
   Boolean(process.env.GITHUB_CLIENT_ID) &&
   Boolean(process.env.GITHUB_CLIENT_SECRET);
 
+/**
+ * 追加 trustedOrigins（Better Auth 仍会合并 BETTER_AUTH_TRUSTED_ORIGINS 环境变量与 baseURL）。
+ * EdgeOne Pages 域名为 *.edgeone.cool，与仅配置 localhost 的 BETTER_AUTH_URL 并存时需放行该 Origin。
+ */
+function buildTrustedOrigins(): string[] {
+  if (
+    process.env.NODE_ENV !== "production" ||
+    process.env.BETTER_AUTH_EDGEONE_TRUST === "0"
+  ) {
+    return [];
+  }
+  return ["https://*.edgeone.cool"];
+}
+
 export const auth = betterAuth({
   appName: "Local First App",
   baseURL: process.env.BETTER_AUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET,
+  trustedOrigins: buildTrustedOrigins(),
   database: drizzleAdapter(db, {
     provider: "pg",
     schema: authSchema,

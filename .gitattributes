@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# 二进制：勿当作文本做换行转换（跨平台一致）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
